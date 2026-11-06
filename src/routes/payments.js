@@ -4,12 +4,20 @@ const Loan = require('../models/Loan');
 const Reminder = require('../models/Reminder');
 const { asyncHandler } = require('../middleware');
 const { monthKey } = require('../utils/dates');
+const { expectedForMonth, syncLoanStatus } = require('../services/loanService');
 
-// GET /api/payments?from=2026-01-01&to=2026-12-31&person=<id>&loan=<id>
+// GET /api/payments?from=2026-01-01&to=2026-12-31&person=<id>&loan=<id>&direction=given|taken
+// direction=given -> money I received, direction=taken -> money I paid. Each payment gets `direction`.
 router.get('/', asyncHandler(async (req, res) => {
   const filter = {};
   if (req.query.person) filter.person = req.query.person;
   if (req.query.loan) filter.loan = req.query.loan;
+  if (['given', 'taken'].includes(req.query.direction)) {
+    const loanIds = await Loan.distinct('_id', { direction: req.query.direction });
+    filter.loan = req.query.loan
+      ? { $in: loanIds.filter((id) => String(id) === String(req.query.loan)) }
+      : { $in: loanIds };
+  }
   if (req.query.from || req.query.to) {
     filter.paidOn = {};
     if (req.query.from) filter.paidOn.$gte = new Date(req.query.from);
@@ -17,10 +25,11 @@ router.get('/', asyncHandler(async (req, res) => {
   }
   const payments = await Payment.find(filter)
     .populate('person', 'name')
-    .populate('loan', 'title principal interestRate')
+    .populate('loan', 'title principal interestRate direction')
     .sort({ paidOn: -1 })
-    .limit(Number(req.query.limit) || 500);
-  res.json(payments);
+    .limit(Math.min(Number(req.query.limit) || 500, 2000))
+    .lean();
+  res.json(payments.map((p) => ({ ...p, direction: p.loan?.direction || 'given' })));
 }));
 
 router.post('/', asyncHandler(async (req, res) => {
@@ -39,17 +48,17 @@ router.post('/', asyncHandler(async (req, res) => {
     note,
   });
 
-  // If that month is now fully paid, mark its reminders as read
+  // If that month's interest is now fully paid, mark its reminders as read
   if (payment.type === 'interest') {
-    const agg = await Payment.aggregate([
-      { $match: { loan: loan._id, forMonth: payment.forMonth, type: 'interest' } },
-      { $group: { _id: null, total: { $sum: '$amount' } } },
-    ]);
-    if ((agg[0]?.total || 0) >= loan.monthlyInterest) {
+    const all = await Payment.find({ loan: loan._id }).lean();
+    const paid = all.filter((p) => p.type === 'interest' && p.forMonth === payment.forMonth).reduce((s, p) => s + p.amount, 0);
+    if (paid >= expectedForMonth(loan, all, payment.forMonth)) {
       await Reminder.updateMany({ loan: loan._id, forMonth: payment.forMonth }, { read: true });
     }
   }
-  res.status(201).json(payment);
+  // Principal fully repaid -> the loan closes by itself and interest stops
+  const loanStatus = payment.type === 'principal' ? await syncLoanStatus(loan._id) : null;
+  res.status(201).json({ ...payment.toObject(), loanStatus });
 }));
 
 router.put('/:id', asyncHandler(async (req, res) => {
@@ -57,13 +66,16 @@ router.put('/:id', asyncHandler(async (req, res) => {
   const data = Object.fromEntries(Object.entries(req.body).filter(([k]) => allowed.includes(k)));
   const payment = await Payment.findByIdAndUpdate(req.params.id, data, { new: true, runValidators: true });
   if (!payment) return res.status(404).json({ message: 'Payment not found' });
-  res.json(payment);
+  const loanStatus = await syncLoanStatus(payment.loan);
+  res.json({ ...payment.toObject(), loanStatus });
 }));
 
 router.delete('/:id', asyncHandler(async (req, res) => {
   const payment = await Payment.findByIdAndDelete(req.params.id);
   if (!payment) return res.status(404).json({ message: 'Payment not found' });
-  res.json({ message: 'Deleted' });
+  // Deleting a principal repayment can reopen a loan that closed automatically
+  const loanStatus = payment.type === 'principal' ? await syncLoanStatus(payment.loan) : null;
+  res.json({ message: 'Deleted', loanStatus });
 }));
 
 module.exports = router;

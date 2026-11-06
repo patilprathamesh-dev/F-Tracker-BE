@@ -1,7 +1,9 @@
 const { Schema, model } = require('mongoose');
 
 /**
- * Money received from a person against a loan.
+ * Money paid against a loan. The meaning comes from loan.direction:
+ *   given loan -> money I RECEIVED from the person
+ *   taken loan -> money I PAID to the person
  * type: 'interest'  -> the monthly interest
  *       'principal' -> part/full repayment of the original amount
  * forMonth: "YYYY-MM" the month this payment covers (used for reminders)

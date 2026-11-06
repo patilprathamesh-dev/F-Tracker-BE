@@ -4,11 +4,19 @@ const Loan = require('../models/Loan');
 const Payment = require('../models/Payment');
 const Reminder = require('../models/Reminder');
 const { monthKey, monthLabel, dueDateFor, daysBetween, inr } = require('../utils/dates');
-const { firstDueMonth } = require('./loanService');
+const { firstDueMonth, expectedForMonth, principalAtMonth } = require('./loanService');
+const { sendToAll } = require('./pushService');
 
-function buildMessage({ personName, loan, forMonth, kind, balance, dueDate }) {
+/**
+ * given: "Payment reminder for November 2026: Rahul Sharma has to pay ₹2,000 interest (2% of ₹1,00,000). Due on 5 Nov 2026."
+ * taken: "Payment reminder for November 2026: You have to pay ₹1,500 interest to Amit Joshi (1.5% of ₹1,00,000). Due on 10 Nov 2026."
+ */
+function buildMessage({ personName, loan, forMonth, kind, balance, dueDate, principal }) {
   const due = dueDate.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
-  const base = `${personName} has to pay ${inr(balance)} interest (${loan.interestRate}% of ${inr(loan.principal)})`;
+  const rate = `(${loan.interestRate}% of ${inr(principal ?? loan.principal)})`;
+  const base = loan.direction === 'taken'
+    ? `You have to pay ${inr(balance)} interest to ${personName} ${rate}`
+    : `${personName} has to pay ${inr(balance)} interest ${rate}`;
   const label = monthLabel(forMonth);
   if (kind === 'upcoming') return `Payment reminder for ${label}: ${base}. Due on ${due}.`;
   if (kind === 'due') return `Payment reminder for ${label}: ${base}. Due TODAY (${due}).`;
@@ -35,13 +43,13 @@ async function generateReminders(now = new Date()) {
     const prev = monthKey(new Date(now.getFullYear(), now.getMonth() - 1, 1));
     const keys = [prev, currentKey].filter((k) => k >= first);
 
+    const payments = await Payment.find({ loan: loan._id }).lean();
     for (const forMonth of keys) {
-      const paidAgg = await Payment.aggregate([
-        { $match: { loan: loan._id, forMonth, type: 'interest' } },
-        { $group: { _id: null, total: { $sum: '$amount' } } },
-      ]);
-      const paid = paidAgg[0]?.total || 0;
-      const balance = loan.monthlyInterest - paid;
+      // Interest is on the principal still owed at the start of that month
+      const principal = principalAtMonth(loan, payments, forMonth);
+      const expected = expectedForMonth(loan, payments, forMonth);
+      const paid = payments.filter((p) => p.type === 'interest' && p.forMonth === forMonth).reduce((s, p) => s + p.amount, 0);
+      const balance = Math.round((expected - paid) * 100) / 100;
       if (balance <= 0) continue;
 
       const dueDate = dueDateFor(forMonth, loan.dueDay);
@@ -52,17 +60,17 @@ async function generateReminders(now = new Date()) {
       else if (days <= daysBefore) kind = 'upcoming';
       if (!kind) continue;
 
-      const message = buildMessage({ personName: loan.person.name, loan, forMonth, kind, balance, dueDate });
+      const message = buildMessage({ personName: loan.person.name, loan, forMonth, kind, balance, dueDate, principal });
       const res = await Reminder.updateOne(
         { loan: loan._id, forMonth, kind },
-        { $setOnInsert: { person: loan.person._id, amount: balance, dueDate, message, read: false } },
+        { $setOnInsert: { person: loan.person._id, direction: loan.direction || 'given', amount: balance, dueDate, message, read: false } },
         { upsert: true }
       );
-      if (res.upsertedCount) created.push({ message, kind, forMonth });
+      if (res.upsertedCount) created.push({ message, kind, forMonth, direction: loan.direction || 'given', id: res.upsertedId });
     }
   }
 
-  if (created.length) await sendEmail(created);
+  if (created.length) await Promise.all([sendEmail(created), sendPush(created)]);
   return created;
 }
 
@@ -83,6 +91,22 @@ async function sendEmail(reminders) {
     });
   } catch (err) {
     console.error('Reminder email failed:', err.message);
+  }
+}
+
+// One push notification per new reminder (Web Push to the iPhone Home Screen app)
+async function sendPush(reminders) {
+  try {
+    for (const r of reminders) {
+      await sendToAll({
+        title: 'Payment reminder',
+        body: r.message,
+        url: '/reminders',
+        tag: String(r.id || `${r.forMonth}-${r.kind}`),
+      });
+    }
+  } catch (err) {
+    console.error('Reminder push failed:', err.message);
   }
 }
 

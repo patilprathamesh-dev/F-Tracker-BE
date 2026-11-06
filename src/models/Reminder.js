@@ -9,6 +9,7 @@ const reminderSchema = new Schema(
   {
     loan: { type: Schema.Types.ObjectId, ref: 'Loan', required: true },
     person: { type: Schema.Types.ObjectId, ref: 'Person', required: true },
+    direction: { type: String, enum: ['given', 'taken'], default: 'given' }, // copied from the loan
     forMonth: { type: String, required: true }, // YYYY-MM
     kind: { type: String, enum: ['upcoming', 'due', 'overdue'], required: true },
     amount: { type: Number, required: true },

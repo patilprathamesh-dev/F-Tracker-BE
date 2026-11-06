@@ -9,7 +9,7 @@ router.get('/', asyncHandler(async (req, res) => {
   if (req.query.unread === 'true') filter.read = false;
   const reminders = await Reminder.find(filter)
     .populate('person', 'name phone')
-    .populate('loan', 'title')
+    .populate('loan', 'title direction')
     .sort({ read: 1, dueDate: 1 })
     .limit(200);
   res.json(reminders);
