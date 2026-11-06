@@ -1,0 +1,20 @@
+{
+  "name": "finance-tracker-backend",
+  "version": "1.0.0",
+  "description": "Personal payment & interest tracker API (Express + MongoDB)",
+  "main": "src/server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "seed": "node src/seed.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "mongoose": "^8.9.5",
+    "node-cron": "^3.0.3",
+    "nodemailer": "^6.9.16"
+  }
+}
